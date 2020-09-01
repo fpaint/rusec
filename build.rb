@@ -3,6 +3,7 @@
 require 'zip'
 require 'fileutils'
 require 'action_view'
+require 'facets/file'
 
 #=====================================================
 class Helper
@@ -12,8 +13,10 @@ end
 #=====================================================
 class Entry
 
+  attr_reader :author, :title, :file, :lang
+
   def initialize(author:, genre:, title:, file:, ext:, lang:, **rest)
-    @author = (author.split(':').first || '_').split(',')
+    @author = (author.split(':').first || '_').split(',').join(' ').gsub(/\.$/, '').gsub(/\./, '_')
     @genre = genre.split(':').reject(&:empty?)
     @title = title || '_'
     @file = file
@@ -30,15 +33,19 @@ class Entry
   end
 
   def to_s
-    "#{filename}: #{@author.join(' ')}, \"#{@title}\" (#{@genre.join(',')})"
+    "#{filename}: #{@author}, \"#{@title}\" (#{@genre.join(',')})"
   end
 
   def output_file
-    genre = child_genre || @genre
-    author = @author.join(' ')
+    genre = genre_str
+    author = @author
     title_full = @title.gsub(/[^[[:alnum:]]]+/, ' ').strip.gsub(/\s/, '_')
     title = Helper.truncate(title_full, length: 100, separator: '_', omission: '')
     "#{genre}/#{author}/#{title}_#{@file}.#{@ext}"
+  end
+
+  def genre_str
+    child_genre || @genre
   end
 
   def child_genre
@@ -100,16 +107,16 @@ end
 #=====================================================
 class InpReader 
 
-  def read(data)
+  def self.read(data)
     entries = []
     data.each do |line|
-      entry = read_line(line)
+      entry = self.read_line(line)
       entries << entry if(entry.ru? && entry.child_genre) 
     end
     entries
   end
 
-  def read_line(line)
+  def self.read_line(line)
     keys = [:author, :genre, :title, :series, :serno, :file, :size, :libid, :del, :ext, :date, :lang]
     record = keys.zip(line.force_encoding('UTF-8').split(/\x04/)).to_h
     Entry.new(record)
@@ -118,24 +125,55 @@ class InpReader
 end
 
 #=====================================================
+class Contents 
+
+  def initialize
+    @books = {}
+  end
+
+  def add(entries)
+    entries.each do |entry|
+      key = entry.genre_str
+      @books[key] ||= []
+      @books[key] << "#{entry.author}, \"#{entry.title}\""
+    end
+  end
+
+  def write(output_path)
+    @books.keys.each do |key|
+      filename = "#{output_path}/#{key}.txt"
+      File.writelines filename, @books[key].sort
+    end
+  end
+
+end
+
+#=====================================================
 class InpxReader 
   
+  INPX_FILENAME = 'librusec_local_fb2.inpx'
+
   def initialize(input_path, output_path)
     @input_path = input_path
-    @output_path = output_path 
+    @output_path = output_path
+    @contents = Contents.new 
   end
 
   def extract
-    reader = InpReader.new
-    Zip::File.open("#{@input_path}/librusec_local_fb2.inpx") do |zip|
-      zip.glob('*.inp').each do |file|
-        name = file.name.split('.').first
-        entries = reader.read(file.get_input_stream.readlines)
-        puts "File #{name}, #{entries.count} book found"
-        extractor = Extractor.new("#{@input_path}/lib.rus.ec/#{name}.zip", @output_path)
-        extractor.extract(entries)
-      end
+    Zip::File.open("#{@input_path}/#{INPX_FILENAME}") do |zip|
+      # extract_file zip.glob('*.inp').first
+      zip.glob('*.inp').each{|file| extract_file(file)}
     end
+    @contents.write(@output_path)
+  end
+
+  def extract_file(file)
+    name = file.name.split('.').first
+    entries = InpReader.read(file.get_input_stream.readlines)
+    puts "File #{name}, #{entries.count} book found"
+    extractor = Extractor.new("#{@input_path}/lib.rus.ec/#{name}.zip", @output_path)
+    extractor.extract(entries)
+    @contents.add(entries)
   end
 
 end
